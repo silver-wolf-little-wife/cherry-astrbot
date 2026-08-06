@@ -1,0 +1,20 @@
+{
+  "ws_port": {
+    "type": "int",
+    "description": "WebSocket 服务端口",
+    "default": 8765,
+    "hint": "C 端 cherry-remote-app 将连接到此端口"
+  },
+  "auth_token": {
+    "type": "string",
+    "description": "认证 token（C 端 App 必须配置相同值）",
+    "default": "change-me",
+    "hint": "建议使用强随机字符串"
+  },
+  "heartbeat_timeout": {
+    "type": "int",
+    "description": "心跳超时（秒），超过未收到设备任何帧则判定掉线",
+    "default": 60,
+    "hint": "建议大于 App 端 heartbeat_interval"
+  }
+}

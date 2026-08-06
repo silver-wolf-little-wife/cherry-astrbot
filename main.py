@@ -1,24 +1,178 @@
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+# SPDX-License-Identifier: AGPL-3.0-only
+"""Cherry Remote —— AstrBot 远程操控连接器。
+
+纯连接器：桥接 AstrBot（B端）与远程电脑上的 cherry-remote-app（C端）。
+- 内嵌 aiohttp WebSocket 服务端，接受 C 端 App 主动外连（穿透 NAT）。
+- 注册 FunctionTool，使 AstrBot Agent 可将用户需求转为远程指令下发。
+- 回收执行结果回传 Agent 研判后，由 AstrBot 回复原会话。
+"""
+
+import asyncio
+import json
+from dataclasses import dataclass, field
+from typing import Any
+
+from astrbot.api import FunctionTool, logger
+from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
-from astrbot.api import logger
 
-@register("helloworld", "YourName", "一个简单的 Hello World 插件", "1.0.0")
-class MyPlugin(Star):
-    def __init__(self, context: Context):
+try:
+    from astrbot.core.agent.tool import ToolExecResult
+except ImportError:  # pragma: no cover
+    ToolExecResult = str  # type: ignore
+
+from .ws_server import RemoteWsServer
+
+
+@dataclass
+class RemoteExecTool(FunctionTool):
+    """远程执行 shell 命令。"""
+
+    name: str = "remote_exec"
+    description: str = (
+        "在远程电脑（C端）上执行一条 shell 命令并返回 stdout/stderr 与退出码。"
+        "用于查看/操作远程电脑上的程序、文件与系统。"
+    )
+    parameters: dict = field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "要执行的 shell 命令。"},
+                "timeout": {
+                    "type": "integer",
+                    "description": "超时秒数，默认 30。",
+                    "default": 30,
+                },
+                "cwd": {"type": "string", "description": "工作目录，可选。"},
+            },
+            "required": ["command"],
+        }
+    )
+
+    async def call(self, context: Any, **kwargs) -> ToolExecResult:
+        server: RemoteWsServer | None = getattr(self, "_server", None)
+        if server is None:
+            return json.dumps({"ok": False, "error": "连接器尚未初始化"}, ensure_ascii=False)
+        timeout = int(kwargs.get("timeout") or 30)
+        params = {"command": kwargs["command"], "timeout": timeout}
+        if kwargs.get("cwd"):
+            params["cwd"] = kwargs["cwd"]
+        try:
+            resp = await server.send_command("exec", params, timeout=timeout + 10)
+            return json.dumps(resp, ensure_ascii=False, default=str)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+
+
+@dataclass
+class RemoteSysInfoTool(FunctionTool):
+    """获取远程电脑系统信息。"""
+
+    name: str = "remote_sysinfo"
+    description: str = (
+        "获取远程电脑（C端）的系统信息，包括 CPU/内存/磁盘使用率、主机名、操作系统等。"
+    )
+    parameters: dict = field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {},
+        }
+    )
+
+    async def call(self, context: Any, **kwargs) -> ToolExecResult:
+        server: RemoteWsServer | None = getattr(self, "_server", None)
+        if server is None:
+            return json.dumps({"ok": False, "error": "连接器尚未初始化"}, ensure_ascii=False)
+        try:
+            resp = await server.send_command("sys", {}, timeout=30)
+            return json.dumps(resp, ensure_ascii=False, default=str)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+
+
+@dataclass
+class RemotePingTool(FunctionTool):
+    """探测远程电脑连通性。"""
+
+    name: str = "remote_ping"
+    description: str = "检测远程电脑（C端）是否在线，返回 pong。"
+    parameters: dict = field(
+        default_factory=lambda: {"type": "object", "properties": {}}
+    )
+
+    async def call(self, context: Any, **kwargs) -> ToolExecResult:
+        server: RemoteWsServer | None = getattr(self, "_server", None)
+        if server is None:
+            return json.dumps({"ok": False, "error": "连接器尚未初始化"}, ensure_ascii=False)
+        try:
+            resp = await server.send_command("ping", {}, timeout=15)
+            return json.dumps(resp, ensure_ascii=False, default=str)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+
+
+@register(
+    "astrbot_plugin_cherry_remote",
+    "littlewifeofsilverwolf",
+    "远程操控连接器：桥接 AstrBot 与远程电脑 App",
+    "0.1.0",
+)
+class CherryRemote(Star):
+    """Cherry Remote —— 远程操控连接器。
+
+    桥接 AstrBot 与远程电脑上的 cherry-remote-app：
+    - 建立 B 端 WebSocket 服务，接受 C 端 App 主动外连（穿透 NAT）
+    - 注册 FunctionTool，使 AstrBot Agent 可将用户需求转为远程指令下发
+    - 回收执行结果回传 Agent 研判，最终回复发回原会话
+    """
+
+    def __init__(self, context: Context, config: dict):
         super().__init__(context)
+        self.config = config
+        self.server: RemoteWsServer | None = None
+        self._server_task: asyncio.Task | None = None
 
-    async def initialize(self):
-        """可选择实现异步的插件初始化方法，当实例化该插件类之后会自动调用该方法。"""
+    async def initialize(self) -> None:
+        """启动 WebSocket 服务端并注册 FunctionTool。"""
+        port = int(self.config.get("ws_port", 8765))
+        token = str(self.config.get("auth_token", ""))
+        heartbeat_timeout = int(self.config.get("heartbeat_timeout", 60))
 
-    # 注册指令的装饰器。指令名为 helloworld。注册成功后，发送 `/helloworld` 就会触发这个指令，并回复 `你好, {user_name}!`
-    @filter.command("helloworld")
-    async def helloworld(self, event: AstrMessageEvent):
-        """这是一个 hello world 指令""" # 这是 handler 的描述，将会被解析方便用户了解插件内容。建议填写。
-        user_name = event.get_sender_name()
-        message_str = event.message_str # 用户发的纯文本消息字符串
-        message_chain = event.get_messages() # 用户所发的消息的消息链 # from astrbot.api.message_components import *
-        logger.info(message_chain)
-        yield event.plain_result(f"Hello, {user_name}, 你发了 {message_str}!") # 发送一条纯文本消息
+        self.server = RemoteWsServer(port=port, token=token, heartbeat_timeout=heartbeat_timeout)
+        self._server_task = asyncio.create_task(self.server.start())
 
-    async def terminate(self):
-        """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
+        tools = self._build_tools()
+        if tools:
+            self.context.add_llm_tools(*tools)
+        logger.info("Cherry Remote 初始化完成。")
+
+    def _build_tools(self) -> list[FunctionTool]:
+        if self.server is None:
+            return []
+        built: list[FunctionTool] = []
+        for tool_cls in (RemoteExecTool, RemoteSysInfoTool, RemotePingTool):
+            tool = tool_cls()
+            tool._server = self.server  # type: ignore[attr-defined]
+            built.append(tool)
+        return built
+
+    @filter.command("cherry")
+    async def cherry(self, event: AstrMessageEvent):
+        """Cherry Remote 状态查询。发送 `/cherry` 检查插件与设备状态。"""
+        if self.server is None:
+            yield event.plain_result("Cherry Remote 尚未初始化。")
+            return
+        devices = self.server.device_summary()
+        if not devices:
+            yield event.plain_result(
+                "Cherry Remote 已就绪，但暂无远程设备在线。请先启动 C 端 cherry-remote-app 并接入。"
+            )
+            return
+        lines = [f"- {d['device_id']}（session {d['session_id'][:8]}）" for d in devices]
+        yield event.plain_result("Cherry Remote 已就绪，在线设备：\n" + "\n".join(lines))
+
+    async def terminate(self) -> None:
+        """插件卸载/停用时：停止服务端，释放资源。"""
+        if self.server:
+            await self.server.stop()
+        logger.info("Cherry Remote 连接器已停止。")
