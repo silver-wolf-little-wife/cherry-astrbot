@@ -90,6 +90,14 @@ class RemoteWsServer:
             await ws.send_json({"type": "hello_ack", "ok": False, "error": "missing_device_id"})
             await ws.close(code=4002, message=b"missing device_id")
             return None
+        # 同一 device_id 已在线时，先关闭旧连接，避免重复实例抢占/路由混乱
+        old = self.devices.get(device_id)
+        if old and old.get("ws") is not ws:
+            try:
+                await old["ws"].close(code=4000, message=b"device reconnected")
+            except Exception:
+                pass
+            print(f"[ws_server] 设备 {device_id} 旧连接已关闭（重复接入）")
         session_id = str(uuid.uuid4())
         self.devices[device_id] = {
             "ws": ws,
