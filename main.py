@@ -19,8 +19,8 @@ from typing import Any
 import astrbot.api.message_components as Comp
 from astrbot.api import FunctionTool, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message import MessageChain
 from astrbot.api.star import Context, Star, register
+from astrbot.core.message.message_event_result import MessageChain
 
 try:
     from astrbot.core.agent.tool import ToolExecResult
