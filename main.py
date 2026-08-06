@@ -8,12 +8,18 @@
 """
 
 import asyncio
+import base64
 import json
+import time
+import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+import astrbot.api.message_components as Comp
 from astrbot.api import FunctionTool, logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message import MessageChain
 from astrbot.api.star import Context, Star, register
 
 try:
@@ -22,6 +28,26 @@ except ImportError:  # pragma: no cover
     ToolExecResult = str  # type: ignore
 
 from .ws_server import RemoteWsServer
+
+
+def _get_plugin_data_dir() -> Path:
+    """获取插件数据目录：data/plugin_data/cherry_remote/。"""
+    from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+
+    d = Path(get_astrbot_data_path()) / "plugin_data" / "cherry_remote"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _save_screenshot_image(data: dict) -> str:
+    """把 C 端返回的 base64 截图解码并存到 B 端本地，返回文件路径。"""
+    img_bytes = base64.b64decode(data["image"])
+    shots = _get_plugin_data_dir() / "screenshots"
+    shots.mkdir(parents=True, exist_ok=True)
+    fname = f"shot_{int(time.time())}_{uuid.uuid4().hex[:6]}.png"
+    path = shots / fname
+    path.write_bytes(img_bytes)
+    return str(path)
 
 
 @dataclass
@@ -200,7 +226,10 @@ class RemoteScreenshotTool(FunctionTool):
     """远程截屏。"""
 
     name: str = "remote_screenshot"
-    description: str = "截取远程电脑（C端）的当前屏幕，返回 base64 PNG 图片。"
+    description: str = (
+        "截取远程电脑（C端）的完整屏幕（含所有显示器），保存为服务器本地 PNG 文件，"
+        "并尝试直接把图片发送给用户。"
+    )
     parameters: dict = field(
         default_factory=lambda: {"type": "object", "properties": {}}
     )
@@ -211,9 +240,40 @@ class RemoteScreenshotTool(FunctionTool):
             return json.dumps({"ok": False, "error": "连接器尚未初始化"}, ensure_ascii=False)
         try:
             resp = await server.send_command("screenshot", {}, timeout=30)
-            return json.dumps(resp, ensure_ascii=False, default=str)
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+        if not resp.get("ok"):
+            return json.dumps({"ok": False, "error": resp.get("error")}, ensure_ascii=False)
+
+        data = resp["data"]
+        try:
+            path = _save_screenshot_image(data)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"保存截图失败: {e}"}, ensure_ascii=False)
+
+        sent = False
+        try:
+            inner = getattr(context, "context", None)
+            star_ctx = getattr(inner, "context", None)
+            event = getattr(inner, "event", None)
+            if star_ctx is not None and event is not None:
+                chain = MessageChain().file_image(path)
+                await star_ctx.send_message(event.unified_msg_origin, chain)
+                sent = True
+        except Exception as e:  # noqa: BLE001 —— 直发失败则回退为返回路径
+            logger.warning(f"截图直接发送失败，改为返回路径: {e}")
+
+        return json.dumps(
+            {
+                "ok": True,
+                "sent_to_user": sent,
+                "path": path,
+                "width": data.get("width"),
+                "height": data.get("height"),
+                "size": data.get("size"),
+            },
+            ensure_ascii=False,
+        )
 
 
 @register(
@@ -282,6 +342,34 @@ class CherryRemote(Star):
             return
         lines = [f"- {d['device_id']}（session {d['session_id'][:8]}）" for d in devices]
         yield event.plain_result("Cherry Remote 已就绪，在线设备：\n" + "\n".join(lines))
+
+    @filter.command("screenshot")
+    async def screenshot(self, event: AstrMessageEvent):
+        """截取 C 端完整屏幕并直接以图片发送。"""
+        if self.server is None:
+            yield event.plain_result("Cherry Remote 尚未初始化。")
+            return
+        try:
+            resp = await self.server.send_command("screenshot", {}, timeout=30)
+        except Exception as e:
+            yield event.plain_result(f"截屏失败: {e}")
+            return
+        if not resp.get("ok"):
+            yield event.plain_result(f"截屏失败: {resp.get('error')}")
+            return
+        data = resp["data"]
+        try:
+            path = _save_screenshot_image(data)
+        except Exception as e:
+            yield event.plain_result(f"截屏成功但保存失败: {e}")
+            return
+        size_kb = (data.get("size") or 0) // 1024
+        yield event.chain_result(
+            [
+                Comp.Image.fromFileSystem(path),
+                Comp.Plain(f"截图 {data.get('width')}x{data.get('height')}（{size_kb}KB）"),
+            ]
+        )
 
     async def terminate(self) -> None:
         """插件卸载/停用时：停止服务端，释放资源。"""
