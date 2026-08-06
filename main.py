@@ -333,7 +333,7 @@ class RemoteScreenshotTool(FunctionTool):
     "astrbot_plugin_cherry_remote",
     "littlewifeofsilverwolf",
     "远程操控连接器：桥接 AstrBot 与远程电脑 App",
-    "0.1.0",
+    "1.0.0",
 )
 class CherryRemote(Star):
     """Cherry Remote —— 远程操控连接器。

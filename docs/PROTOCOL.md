@@ -1,4 +1,4 @@
-# Cherry Remote 通信协议 v0.1.0
+# Cherry Remote 通信协议 v1.0.0
 
 > 双仓库共享协议。本文档为权威版本，`cherry-astrbot`（插件）与 `cherry-remote-app`（App）必须保持同步。
 
@@ -15,13 +15,13 @@
 C 连接成功后，必须首先发送 `hello`：
 
 ```json
-{"type": "hello", "token": "<auth_token>", "device_id": "home-pc", "client_version": "0.1.0"}
+{"type": "hello", "token": "<auth_token>", "device_id": "home-pc", "client_version": "1.0.0"}
 ```
 
 B 响应：
 
 ```json
-{"type": "hello_ack", "ok": true, "session_id": "<uuid>", "server_version": "0.1.0"}
+{"type": "hello_ack", "ok": true, "session_id": "<uuid>", "server_version": "1.0.0"}
 ```
 
 失败时 B 返回 `ok:false` 并立即断开：

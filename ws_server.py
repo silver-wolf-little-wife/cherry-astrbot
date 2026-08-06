@@ -109,7 +109,7 @@ class RemoteWsServer:
                 "type": "hello_ack",
                 "ok": True,
                 "session_id": session_id,
-                "server_version": "0.1.0",
+                "server_version": "1.0.0",
             }
         )
         print(f"[ws_server] 设备接入: {device_id}（session={session_id[:8]}），在线 {len(self.devices)} 台")
