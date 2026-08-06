@@ -135,13 +135,53 @@ B 响应：
 
 成功响应 `data`：`{"pong": true}`
 
-### 6.4 扩展 Method（规划中，M4 实现）
+### 6.4 `file` — 文件操作
 
-| method | 说明 |
-|---|---|
-| `file` | 文件读写/列举/复制/删除，`action` 参数区分 |
-| `app` | 启动/结束应用，`action` 参数区分 |
-| `screenshot` | 截屏，返回 base64 或文件传输 |
+```json
+{
+  "method": "file",
+  "params": {
+    "action": "list",
+    "path": "C:\\Users\\x\\Desktop",
+    "recursive": false
+  }
+}
+```
+
+`action` 取值与响应：
+
+| action | 必填参数 | 可选参数 | 响应 data |
+|---|---|---|---|
+| `list` | `path` | `recursive` | `{"path","count","entries":[{name,path,type,size,mtime}]}` |
+| `read` | `path` | — | `{"path","encoding","size","content"}`（文本用 utf-8/locale，二进制用 base64） |
+| `write` | `path`,`content` | `encoding=base64` | `{"path","ok","bytes"}` |
+| `copy` | `path`,`dest` | — | `{"ok","src","dest"}` |
+| `delete` | `path` | — | `{"ok","deleted"}` |
+| `info` | `path` | — | `{"path","type","size","mtime","absolute"}` |
+
+> ⚠️ `delete` 会永久删除文件/目录，属高危操作，请在 `allowed_actions` 白名单层面控制。
+
+### 6.5 `app` — 应用启停
+
+```json
+{
+  "method": "app",
+  "params": {"action": "launch", "name": "notepad.exe", "args": []}
+}
+```
+
+| action | 必填参数 | 可选参数 | 响应 data |
+|---|---|---|---|
+| `launch` | `name` | `args`, `cwd` | `{"ok","pid","launched"}` |
+| `terminate` | `pid` 或 `name` | — | `{"ok","terminated":[pid,...]}` |
+
+### 6.6 `screenshot` — 截屏
+
+```json
+{"method": "screenshot", "params": {}}
+```
+
+响应 data：`{"image":"<base64 PNG>","format":"png","width":W,"height":H,"size":N}`
 
 ## 7. 错误码
 

@@ -111,6 +111,111 @@ class RemotePingTool(FunctionTool):
             return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
 
 
+@dataclass
+class RemoteFileTool(FunctionTool):
+    """远程文件操作。"""
+
+    name: str = "remote_file"
+    description: str = (
+        "对远程电脑（C端）进行文件操作。action 取值：list(列目录)、read(读文件)、"
+        "write(写文件)、copy(复制)、delete(删除)、info(文件信息)。"
+    )
+    parameters: dict = field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "read", "write", "copy", "delete", "info"],
+                    "description": "要执行的文件操作。",
+                },
+                "path": {"type": "string", "description": "源文件/目录路径。"},
+                "dest": {"type": "string", "description": "目标路径（copy 时必填）。"},
+                "content": {"type": "string", "description": "写入内容（write 时使用）。"},
+                "recursive": {
+                    "type": "boolean",
+                    "description": "list 时是否递归列出，默认 false。",
+                },
+            },
+            "required": ["action", "path"],
+        }
+    )
+
+    async def call(self, context: Any, **kwargs) -> ToolExecResult:
+        server: RemoteWsServer | None = getattr(self, "_server", None)
+        if server is None:
+            return json.dumps({"ok": False, "error": "连接器尚未初始化"}, ensure_ascii=False)
+        params = {k: v for k, v in kwargs.items() if v is not None}
+        try:
+            resp = await server.send_command("file", params, timeout=60)
+            return json.dumps(resp, ensure_ascii=False, default=str)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+
+
+@dataclass
+class RemoteAppTool(FunctionTool):
+    """远程启动/结束应用。"""
+
+    name: str = "remote_app"
+    description: str = "在远程电脑（C端）上启动或结束应用程序。action：launch(启动)/terminate(结束)。"
+    parameters: dict = field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["launch", "terminate"],
+                    "description": "launch 启动 / terminate 结束。",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "应用名或路径（terminate 时按进程名模糊匹配）。",
+                },
+                "args": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "启动参数（launch 时可选）。",
+                },
+                "pid": {"type": "integer", "description": "按 PID 结束进程（terminate 时可选）。"},
+            },
+            "required": ["action"],
+        }
+    )
+
+    async def call(self, context: Any, **kwargs) -> ToolExecResult:
+        server: RemoteWsServer | None = getattr(self, "_server", None)
+        if server is None:
+            return json.dumps({"ok": False, "error": "连接器尚未初始化"}, ensure_ascii=False)
+        params = {k: v for k, v in kwargs.items() if v is not None}
+        try:
+            resp = await server.send_command("app", params, timeout=30)
+            return json.dumps(resp, ensure_ascii=False, default=str)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+
+
+@dataclass
+class RemoteScreenshotTool(FunctionTool):
+    """远程截屏。"""
+
+    name: str = "remote_screenshot"
+    description: str = "截取远程电脑（C端）的当前屏幕，返回 base64 PNG 图片。"
+    parameters: dict = field(
+        default_factory=lambda: {"type": "object", "properties": {}}
+    )
+
+    async def call(self, context: Any, **kwargs) -> ToolExecResult:
+        server: RemoteWsServer | None = getattr(self, "_server", None)
+        if server is None:
+            return json.dumps({"ok": False, "error": "连接器尚未初始化"}, ensure_ascii=False)
+        try:
+            resp = await server.send_command("screenshot", {}, timeout=30)
+            return json.dumps(resp, ensure_ascii=False, default=str)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+
+
 @register(
     "astrbot_plugin_cherry_remote",
     "littlewifeofsilverwolf",
@@ -150,7 +255,14 @@ class CherryRemote(Star):
         if self.server is None:
             return []
         built: list[FunctionTool] = []
-        for tool_cls in (RemoteExecTool, RemoteSysInfoTool, RemotePingTool):
+        for tool_cls in (
+            RemoteExecTool,
+            RemoteSysInfoTool,
+            RemotePingTool,
+            RemoteFileTool,
+            RemoteAppTool,
+            RemoteScreenshotTool,
+        ):
             tool = tool_cls()
             tool._server = self.server  # type: ignore[attr-defined]
             built.append(tool)
