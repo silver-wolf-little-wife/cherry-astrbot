@@ -184,19 +184,27 @@ class RemoteAppTool(FunctionTool):
     """远程启动/结束应用。"""
 
     name: str = "remote_app"
-    description: str = "在远程电脑（C端）上启动或结束应用程序。action：launch(启动)/terminate(结束)。"
+    description: str = (
+        "在远程电脑（C端）上启动/结束/搜索应用程序。"
+        "action：launch(启动)/terminate(结束)/search(在 exe 索引中搜索应用路径)。"
+        "若不确定应用名，先 search 查 exe 索引。"
+    )
     parameters: dict = field(
         default_factory=lambda: {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["launch", "terminate"],
-                    "description": "launch 启动 / terminate 结束。",
+                    "enum": ["launch", "terminate", "search"],
+                    "description": "launch 启动 / terminate 结束 / search 搜索 exe 索引。",
                 },
                 "name": {
                     "type": "string",
-                    "description": "应用名或路径（terminate 时按进程名模糊匹配）。",
+                    "description": "应用名或完整路径（launch 用；terminate 时按进程名模糊匹配）。",
+                },
+                "query": {
+                    "type": "string",
+                    "description": "search 时的应用名关键字（不填则返回索引前 50 条）。",
                 },
                 "args": {
                     "type": "array",
