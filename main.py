@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: MIT
 """Cherry Remote —— AstrBot 远程操控连接器。
 
 纯连接器：桥接 AstrBot（B端）与远程电脑上的 cherry-remote-app（C端）。

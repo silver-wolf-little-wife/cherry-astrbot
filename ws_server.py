@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: MIT
 """B 端 WebSocket 服务端（仅依赖 aiohttp，独立于 AstrBot，便于测试）。"""
 
 import asyncio
