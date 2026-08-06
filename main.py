@@ -70,6 +70,10 @@ class RemoteExecTool(FunctionTool):
                     "default": 30,
                 },
                 "cwd": {"type": "string", "description": "工作目录，可选。"},
+                "device_id": {
+                    "type": "string",
+                    "description": "目标设备 id（多设备在线时指定；仅一台时可不填）。",
+                },
             },
             "required": ["command"],
         }
@@ -84,7 +88,9 @@ class RemoteExecTool(FunctionTool):
         if kwargs.get("cwd"):
             params["cwd"] = kwargs["cwd"]
         try:
-            resp = await server.send_command("exec", params, timeout=timeout + 10)
+            resp = await server.send_command(
+                "exec", params, device_id=kwargs.get("device_id"), timeout=timeout + 10
+            )
             return json.dumps(resp, ensure_ascii=False, default=str)
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
@@ -101,7 +107,12 @@ class RemoteSysInfoTool(FunctionTool):
     parameters: dict = field(
         default_factory=lambda: {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "device_id": {
+                    "type": "string",
+                    "description": "目标设备 id（多设备在线时指定）。",
+                },
+            },
         }
     )
 
@@ -110,7 +121,9 @@ class RemoteSysInfoTool(FunctionTool):
         if server is None:
             return json.dumps({"ok": False, "error": "连接器尚未初始化"}, ensure_ascii=False)
         try:
-            resp = await server.send_command("sys", {}, timeout=30)
+            resp = await server.send_command(
+                "sys", {}, device_id=kwargs.get("device_id"), timeout=30
+            )
             return json.dumps(resp, ensure_ascii=False, default=str)
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
@@ -123,7 +136,15 @@ class RemotePingTool(FunctionTool):
     name: str = "remote_ping"
     description: str = "检测远程电脑（C端）是否在线，返回 pong。"
     parameters: dict = field(
-        default_factory=lambda: {"type": "object", "properties": {}}
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "device_id": {
+                    "type": "string",
+                    "description": "目标设备 id（多设备在线时指定）。",
+                },
+            },
+        }
     )
 
     async def call(self, context: Any, **kwargs) -> ToolExecResult:
@@ -131,7 +152,9 @@ class RemotePingTool(FunctionTool):
         if server is None:
             return json.dumps({"ok": False, "error": "连接器尚未初始化"}, ensure_ascii=False)
         try:
-            resp = await server.send_command("ping", {}, timeout=15)
+            resp = await server.send_command(
+                "ping", {}, device_id=kwargs.get("device_id"), timeout=15
+            )
             return json.dumps(resp, ensure_ascii=False, default=str)
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
@@ -162,6 +185,10 @@ class RemoteFileTool(FunctionTool):
                     "type": "boolean",
                     "description": "list 时是否递归列出，默认 false。",
                 },
+                "device_id": {
+                    "type": "string",
+                    "description": "目标设备 id（多设备在线时指定）。",
+                },
             },
             "required": ["action", "path"],
         }
@@ -171,9 +198,11 @@ class RemoteFileTool(FunctionTool):
         server: RemoteWsServer | None = getattr(self, "_server", None)
         if server is None:
             return json.dumps({"ok": False, "error": "连接器尚未初始化"}, ensure_ascii=False)
-        params = {k: v for k, v in kwargs.items() if v is not None}
+        params = {k: v for k, v in kwargs.items() if v is not None and k != "device_id"}
         try:
-            resp = await server.send_command("file", params, timeout=60)
+            resp = await server.send_command(
+                "file", params, device_id=kwargs.get("device_id"), timeout=60
+            )
             return json.dumps(resp, ensure_ascii=False, default=str)
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
@@ -212,6 +241,10 @@ class RemoteAppTool(FunctionTool):
                     "description": "启动参数（launch 时可选）。",
                 },
                 "pid": {"type": "integer", "description": "按 PID 结束进程（terminate 时可选）。"},
+                "device_id": {
+                    "type": "string",
+                    "description": "目标设备 id（多设备在线时指定）。",
+                },
             },
             "required": ["action"],
         }
@@ -221,9 +254,11 @@ class RemoteAppTool(FunctionTool):
         server: RemoteWsServer | None = getattr(self, "_server", None)
         if server is None:
             return json.dumps({"ok": False, "error": "连接器尚未初始化"}, ensure_ascii=False)
-        params = {k: v for k, v in kwargs.items() if v is not None}
+        params = {k: v for k, v in kwargs.items() if v is not None and k != "device_id"}
         try:
-            resp = await server.send_command("app", params, timeout=30)
+            resp = await server.send_command(
+                "app", params, device_id=kwargs.get("device_id"), timeout=30
+            )
             return json.dumps(resp, ensure_ascii=False, default=str)
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
@@ -239,7 +274,15 @@ class RemoteScreenshotTool(FunctionTool):
         "并尝试直接把图片发送给用户。"
     )
     parameters: dict = field(
-        default_factory=lambda: {"type": "object", "properties": {}}
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "device_id": {
+                    "type": "string",
+                    "description": "目标设备 id（多设备在线时指定）。",
+                },
+            },
+        }
     )
 
     async def call(self, context: Any, **kwargs) -> ToolExecResult:
@@ -247,7 +290,9 @@ class RemoteScreenshotTool(FunctionTool):
         if server is None:
             return json.dumps({"ok": False, "error": "连接器尚未初始化"}, ensure_ascii=False)
         try:
-            resp = await server.send_command("screenshot", {}, timeout=30)
+            resp = await server.send_command(
+                "screenshot", {}, device_id=kwargs.get("device_id"), timeout=30
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
         if not resp.get("ok"):
@@ -350,6 +395,19 @@ class CherryRemote(Star):
             return
         lines = [f"- {d['device_id']}（session {d['session_id'][:8]}）" for d in devices]
         yield event.plain_result("Cherry Remote 已就绪，在线设备：\n" + "\n".join(lines))
+
+    @filter.command("devices")
+    async def devices(self, event: AstrMessageEvent):
+        """列出当前在线设备。"""
+        if self.server is None:
+            yield event.plain_result("Cherry Remote 尚未初始化。")
+            return
+        devices = self.server.device_summary()
+        if not devices:
+            yield event.plain_result("暂无在线设备。")
+            return
+        lines = [f"- {d['device_id']}（session {d['session_id'][:8]}）" for d in devices]
+        yield event.plain_result("在线设备：\n" + "\n".join(lines))
 
     @filter.command("screenshot")
     async def screenshot(self, event: AstrMessageEvent):
