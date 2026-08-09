@@ -50,6 +50,36 @@ def _save_screenshot_image(data: dict) -> str:
     return str(path)
 
 
+def _persist_pulled(resp: dict) -> str:
+    """把拉取结果落盘，返回本地路径（流式模式直接用落盘路径，单帧模式需写盘）。"""
+    if resp.get("mode") == "stream":
+        return resp["local_path"]
+    pulls = _get_plugin_data_dir() / "pulls"
+    pulls.mkdir(parents=True, exist_ok=True)
+    fname = f"{int(time.time())}_{uuid.uuid4().hex[:6]}_{resp.get('name') or 'file'}"
+    path = pulls / fname
+    content = resp.get("content")
+    if isinstance(content, bytes):
+        path.write_bytes(content)
+    else:
+        path.write_text(str(content), encoding="utf-8")
+    return str(path)
+
+
+def _pulled_chain(local_path: str, name: str, size_kb: int) -> list:
+    """按文件类型构造发送链：图片直显，其余作为附件。"""
+    ext = Path(local_path).suffix.lower()
+    if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"):
+        return [
+            Comp.Image.fromFileSystem(local_path),
+            Comp.Plain(f"{name}（{size_kb}KB）"),
+        ]
+    return [
+        Comp.File(name=name, file=local_path),
+        Comp.Plain(f"{name}（{size_kb}KB）"),
+    ]
+
+
 @dataclass
 class RemoteExecTool(FunctionTool):
     """远程执行 shell 命令。"""
@@ -329,11 +359,83 @@ class RemoteScreenshotTool(FunctionTool):
         )
 
 
+@dataclass
+class RemotePullFileTool(FunctionTool):
+    """从远程电脑拉取文件到本地并直接发送。"""
+
+    name: str = "remote_pull_file"
+    description: str = (
+        "从远程电脑（C端）拉取文件到本地并直接发送给用户（图片直显，其余作为附件发送）。"
+        "支持任意类型与大小，自动选择单帧或流式传输。参数 path 为远程电脑上的文件完整路径。"
+    )
+    parameters: dict = field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "远程电脑上的文件完整路径，如 D:\\xx\\file.zip",
+                },
+                "device_id": {
+                    "type": "string",
+                    "description": "目标设备 id（多设备在线时指定）。",
+                },
+            },
+            "required": ["path"],
+        }
+    )
+
+    async def call(self, context: Any, **kwargs) -> ToolExecResult:
+        server: RemoteWsServer | None = getattr(self, "_server", None)
+        if server is None:
+            return json.dumps({"ok": False, "error": "连接器尚未初始化"}, ensure_ascii=False)
+        try:
+            resp = await server.pull_file(
+                kwargs["path"], device_id=kwargs.get("device_id"), timeout=600
+            )
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+        if not resp.get("ok"):
+            return json.dumps({"ok": False, "error": resp.get("error")}, ensure_ascii=False)
+        try:
+            local_path = _persist_pulled(resp)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"保存文件失败: {e}"}, ensure_ascii=False)
+
+        sent = False
+        try:
+            inner = getattr(context, "context", None)
+            star_ctx = getattr(inner, "context", None)
+            event = getattr(inner, "event", None)
+            if star_ctx is not None and event is not None:
+                chain = MessageChain(
+                    chain=_pulled_chain(
+                        local_path, resp.get("name"), (resp.get("size") or 0) // 1024
+                    )
+                )
+                await star_ctx.send_message(event.unified_msg_origin, chain)
+                sent = True
+        except Exception as e:  # noqa: BLE001 —— 直发失败则回退为返回路径
+            logger.warning(f"文件直接发送失败，改为返回路径: {e}")
+
+        return json.dumps(
+            {
+                "ok": True,
+                "sent_to_user": sent,
+                "mode": resp.get("mode"),
+                "name": resp.get("name"),
+                "size": resp.get("size"),
+                "local_path": local_path,
+            },
+            ensure_ascii=False,
+        )
+
+
 @register(
     "astrbot_plugin_cherry_remote",
     "littlewifeofsilverwolf",
     "远程操控连接器：桥接 AstrBot 与远程电脑 App",
-    "1.1.0",
+    "1.2.0",
 )
 class CherryRemote(Star):
     """Cherry Remote —— 远程操控连接器。
@@ -356,7 +458,14 @@ class CherryRemote(Star):
         token = str(self.config.get("auth_token", ""))
         heartbeat_timeout = int(self.config.get("heartbeat_timeout", 60))
 
-        self.server = RemoteWsServer(port=port, token=token, heartbeat_timeout=heartbeat_timeout)
+        self.server = RemoteWsServer(
+            port=port,
+            token=token,
+            heartbeat_timeout=heartbeat_timeout,
+            pull_threshold=int(self.config.get("pull_threshold", 8 * 1024 * 1024)),
+            max_pull_size=int(self.config.get("max_pull_size", 200 * 1024 * 1024)),
+            pull_dir=str(_get_plugin_data_dir() / "pulls"),
+        )
         self._server_task = asyncio.create_task(self.server.start())
 
         tools = self._build_tools()
@@ -375,6 +484,7 @@ class CherryRemote(Star):
             RemoteFileTool,
             RemoteAppTool,
             RemoteScreenshotTool,
+            RemotePullFileTool,
         ):
             tool = tool_cls()
             tool._server = self.server  # type: ignore[attr-defined]
@@ -436,6 +546,36 @@ class CherryRemote(Star):
                 Comp.Plain(f"截图 {data.get('width')}x{data.get('height')}（{size_kb}KB）"),
             ]
         )
+
+    @filter.command("pull")
+    async def pull(self, event: AstrMessageEvent):
+        """从 C 端拉取文件并直接发送。用法：/pull <远程文件路径>（路径含空格无需引号）"""
+        if self.server is None:
+            yield event.plain_result("Cherry Remote 尚未初始化。")
+            return
+        msg = event.get_message_str().strip()
+        parts = msg.split(maxsplit=1)
+        path = parts[1].strip().strip('\"') if len(parts) > 1 else ""
+        if not path:
+            yield event.plain_result(
+                "用法：/pull <远程文件路径>，例如 /pull D:\\temp\\report.pdf"
+            )
+            return
+        try:
+            resp = await self.server.pull_file(path, timeout=600)
+        except Exception as e:
+            yield event.plain_result(f"拉取失败: {e}")
+            return
+        if not resp.get("ok"):
+            yield event.plain_result(f"拉取失败: {resp.get('error')}")
+            return
+        try:
+            local_path = _persist_pulled(resp)
+        except Exception as e:
+            yield event.plain_result(f"文件已拉到本地但保存失败: {e}")
+            return
+        size_kb = (resp.get("size") or 0) // 1024
+        yield event.chain_result(_pulled_chain(local_path, resp.get("name"), size_kb))
 
     async def terminate(self) -> None:
         """插件卸载/停用时：停止服务端，释放资源。"""

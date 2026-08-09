@@ -203,3 +203,17 @@ B 响应：
 - C 端为**纯执行器**：只执行、回传原始结果，不做任何判断与内容加工。
 - 指令白名单由 C 端 `allowed_actions` 与 B 端共同约束。
 - 审计日志：B 端记录每次下发与结果；C 端记录执行明细。
+
+
+## 3.4 流式文件拉取（file_pull，v1.2.0+）
+
+B 端拉取大文件时使用流式分块，避免大段 base64 进入 LLM 上下文：
+
+1. B 端先发 file.info 探测大小（复用 3.3 单帧读取）。
+2. 小文件（<= pull_threshold，默认 8MB）走单帧 file.read，base64 一次返回。
+3. 大文件流程：
+   - B->C：{"type":"request","id":...,"method":"file_pull","params":{"path":...,"chunk_size":1048576}}
+   - C->B：逐块推送 {"type":"file_data","id":<请求id>,"index":0..n-1,"total":n,"data":<base64>}，B 端边收边落盘，不 resolve 请求
+   - C->B 最后：{"type":"response","id":...,"ok":true,"data":{"name":...,"size":...,"chunks":n,"sha256":...}}
+   - B 端校验：分块数一致 + sha256 匹配才保留文件，否则删除并报错
+4. 失败/超时/断线：B 端清理临时文件与传输状态。

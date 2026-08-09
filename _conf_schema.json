@@ -16,5 +16,17 @@
     "description": "心跳超时（秒），超过未收到设备任何帧则判定掉线",
     "default": 60,
     "hint": "建议大于 App 端 heartbeat_interval"
+  },
+  "pull_threshold": {
+    "type": "int",
+    "description": "文件拉取单帧阈值（字节），小于该值走单帧传输，否则走流式分块",
+    "default": 8388608,
+    "hint": "默认 8MB"
+  },
+  "max_pull_size": {
+    "type": "int",
+    "description": "单次拉取文件大小上限（字节）",
+    "default": 209715200,
+    "hint": "默认 200MB"
   }
 }

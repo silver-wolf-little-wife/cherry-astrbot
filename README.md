@@ -11,7 +11,7 @@
 
 # astrbot_plugin_cherry_remote
 
-**Cherry Remote** —— AstrBot 远程操控连接器。
+**Cherry Remote** —— AstrBot 远程操控连接器。当前版本 **v1.2.0**。
 
 桥接 AstrBot（B地·云服务器）与远程电脑上的 cherry-remote-app（C地·家庭局域网 PC），实现「手机发需求 → AstrBot 调 AI 生成指令 → 插件转发 → 远程电脑执行 → 结果回传 B 端研判 → 回复原会话」的完整闭环。
 
@@ -33,6 +33,7 @@
 | `remote_file` | 文件 list/read/write/copy/delete/info |
 | `remote_app` | 启动/结束/搜索应用（exe 索引） |
 | `remote_screenshot` | 截屏（保存本地 PNG + 直发图片给用户） |
+| `remote_pull_file` | 拉取远程文件到本地并直发（图片直显，其余作附件；小文件单帧、大文件流式分块 + sha256 校验） |
 
 所有工具支持可选 `device_id` 参数（多设备定向下发）。
 
@@ -41,6 +42,7 @@
 - `/cherry` —— 插件与在线设备状态
 - `/devices` —— 列出在线设备
 - `/screenshot` —— 直接截取 C 端屏幕并发图
+- `/pull <远程路径>` —— 拉取 C 端文件并发图/发文件（路径含空格无需引号）
 
 ## 安装（B 端·云服务器）
 
@@ -56,11 +58,13 @@
    - `ws_port`：WS 服务端口（默认 8765）
    - `auth_token`：**必须与 C 端 config.yaml 完全一致**
    - `heartbeat_timeout`：心跳超时
+   - `pull_threshold`：单帧拉取阈值（字节，默认 8MB，超过走流式分块）
+   - `max_pull_size`：单次拉取大小上限（字节，默认 200MB）
 5. AstrBot 全局配置建议：`computer_use_runtime = local`（让 skills 可执行；与本插件无关，但影响 skills/MCP 能力）。
 
 ## 使用
 
-- 直接对话：`帮我截个图发给我`、`打开 C 盘某目录`、`让 C 电脑 ping 一下百度`（需 AstrBot 启用 Agent/Tool 模式）。
+- 直接对话：`帮我截个图发给我`、`打开 C 盘某目录`、`让 C 电脑 ping 一下百度`、`把 C 电脑上的 xxx.zip 发给我`（需 AstrBot 启用 Agent/Tool 模式）。
 - 多设备：对话中指定设备名，或先 `/devices` 查看。
 
 ## 通信协议
@@ -75,6 +79,7 @@
 - [x] M4 功能扩展（file/app/screenshot + 审计）
 - [x] M5 Agent 化（FunctionTool 工具集）
 - [x] M6 安全加固（急停/多设备/防重复连接）
+- [x] M7 文件拉取（remote_pull_file + /pull，流式分块 + sha256 校验）
 
 ## 作者
 
