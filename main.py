@@ -246,7 +246,8 @@ class RemoteAppTool(FunctionTool):
     description: str = (
         "在远程电脑（C端）上启动/结束/搜索应用程序。"
         "action：launch(启动)/terminate(结束)/search(在 exe 索引中搜索应用路径)。"
-        "若不确定应用名，先 search 查 exe 索引。"
+        "search 同时匹配 exe 文件名与产品名/文件说明（显示名，如“米哈游启动器”→HYP.exe），"
+        "命中产品名时返回 matched_on=product 与 product 字段。若不确定应用名，先 search 查 exe 索引。"
     )
     parameters: dict = field(
         default_factory=lambda: {
