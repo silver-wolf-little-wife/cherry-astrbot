@@ -106,6 +106,19 @@
 
 见 [`docs/PROTOCOL.md`](docs/PROTOCOL.md)（与 cherry-remote-app 共享）。
 
+## 测试
+
+自带一套自测脚本（桩掉 `astrbot` / `aiohttp` / `mcp`，**不需要 AstrBot 环境**）：
+
+```bash
+python test_plugin.py
+```
+
+覆盖：设备选择器解析、命令词剥离、`/camera` 与 `/screenshot` 的设备指定与位置参数兜底、
+`/use` 会话固定/单次覆盖/离线提示、`/pull` 含空格路径不被破坏、`ws_server` 多设备提示与回包 `device_id`、
+`remote_camera` 的 `CallToolResult + ImageContent`、错误码翻译、forward 直发、落盘裁剪、注册开关。
+全绿输出 `ALL PASS`。
+
 ## 开发状态
 
 - [x] M1 协议定稿

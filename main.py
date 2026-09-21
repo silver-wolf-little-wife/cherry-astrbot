@@ -824,6 +824,27 @@ class CherryRemote(Star):
             )
         return None, None
 
+    def _online_device_ids(self) -> list[str]:
+        return [d["device_id"] for d in self.server.device_summary()] if self.server else []
+
+    def _is_online_device(self, token: str) -> bool:
+        """token 是否恰好是某台在线设备的 device_id。"""
+        return token in self._online_device_ids()
+
+    def _split_positional_device(self, tail: str) -> tuple[str | None, str]:
+        """位置参数里的设备名兜底解析（让 `/camera ChengXiyue 1` 这种写法也能用）。
+
+        规则：首个 token 非纯数字 → 视为设备名；是纯数字但恰好等于某台在线设备的
+        device_id（如 `002`）→ 也视为设备名；否则保留为位置参数（摄像头 index 等）。
+        """
+        tail = (tail or "").strip()
+        if not tail:
+            return None, ""
+        first, _, rest = tail.partition(" ")
+        if not first.isdigit() or self._is_online_device(first):
+            return first, rest.strip()
+        return None, tail
+
     @filter.command("use")
     async def use(self, event: AstrMessageEvent):
         """固定本会话使用的远程设备（多台在线时必用）。用法：/use <设备id>；/use 查看；/use - 取消。"""
@@ -866,7 +887,9 @@ class CherryRemote(Star):
         if self.server is None:
             yield event.plain_result("Cherry Remote 尚未初始化。")
             return
-        explicit, _ = _extract_device_prefix(_command_tail(event, "screenshot"))
+        explicit, tail = _extract_device_prefix(_command_tail(event, "screenshot"))
+        if explicit is None:
+            explicit, _ = self._split_positional_device(tail)
         device_id, err = self._resolve_device(event, explicit)
         if err:
             yield event.plain_result(err)
@@ -905,6 +928,8 @@ class CherryRemote(Star):
             yield event.plain_result("Cherry Remote 尚未初始化。")
             return
         explicit, tail = _extract_device_prefix(_command_tail(event, "camera"))
+        if explicit is None:
+            explicit, tail = self._split_positional_device(tail)
         device_id, err = self._resolve_device(event, explicit)
         if err:
             yield event.plain_result(err)
