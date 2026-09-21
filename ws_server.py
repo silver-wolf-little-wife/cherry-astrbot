@@ -161,10 +161,14 @@ class RemoteWsServer:
             {"type": "request", "id": req_id, "method": method, "params": params or {}}
         )
         try:
-            return await asyncio.wait_for(fut, timeout=timeout)
+            data = await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError:
             self._pending.pop(req_id, None)
             raise TimeoutError(f"指令 {method} 执行超时（{timeout}s）") from None
+        # 回包附带实际执行设备，方便多设备场景确认/审计（C 端返回体不含该字段）
+        if isinstance(data, dict):
+            data.setdefault("device_id", self._device_id_of(device))
+        return data
 
     async def pull_file(
         self,
@@ -342,9 +346,23 @@ class RemoteWsServer:
             if len(self.devices) == 1:
                 return next(iter(self.devices.values()))
             if len(self.devices) > 1:
-                raise RuntimeError(
-                    f"多台设备在线，请指定 device_id：{list(self.devices.keys())}"
-                )
+                raise RuntimeError(self.multi_device_hint())
+        return None
+
+    def multi_device_hint(self) -> str:
+        """多台设备在线时的提示：给出可直接复制的两种指定方式。"""
+        ids = sorted(self.devices.keys())
+        return (
+            f"多台设备在线（{'、'.join(ids)}），请指定设备：\n"
+            f"· 单次指定：指令后加 @设备id，如 /camera @{ids[0] if ids else '设备id'}\n"
+            f"· 会话固定：/use {ids[0] if ids else '设备id'}（之后该会话默认用它）"
+        )
+
+    def _device_id_of(self, info: dict) -> str | None:
+        """反查某条连接对应的 device_id（回包时附带，便于多设备下确认目标机）。"""
+        for did, dev in self.devices.items():
+            if dev is info:
+                return did
         return None
 
     def _resolve(self, data: dict) -> None:

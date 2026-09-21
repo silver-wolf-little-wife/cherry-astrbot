@@ -124,6 +124,45 @@ def _json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, default=str)
 
 
+def _command_tail(event: AstrMessageEvent, command: str) -> str:
+    """取斜杠命令之后的参数原文（不同 AstrBot 版本可能带/不带命令词，这里都兼容）。"""
+    text = (event.get_message_str() or "").strip()
+    if not text:
+        return ""
+    first, _, tail = text.partition(" ")
+    normalized = first.lstrip("/").split("@")[0].lower()  # 兼容 /cmd 与 /cmd@bot
+    if normalized == command.lower() or text.startswith("/"):
+        return tail.strip()
+    return text
+
+
+def _extract_device_prefix(text: str) -> tuple[str | None, str]:
+    """解析参数**开头**的可选设备选择器，返回 (device_id 或 None, 剩余参数原文)。
+
+    支持的写法（都放在命令参数最前面）：
+        /camera @002 1
+        /screenshot --device 002
+        /pull -d ChengXiyue D:\\temp\\a.zip
+        /camera device=002
+
+    剩余参数保持原文（不做分词重组），因此含空格的远程文件路径不会被破坏。
+    """
+    text = (text or "").strip()
+    if not text:
+        return None, ""
+    first, _, rest = text.partition(" ")
+    rest = rest.strip()
+    if first.startswith("@") and len(first) > 1:
+        return first[1:].strip() or None, rest
+    if first in ("--device", "-d", "--dev", "device"):
+        device_id, _, tail = rest.partition(" ")
+        return device_id.strip() or None, tail.strip()
+    for prefix in ("--device=", "-d=", "device="):
+        if first.startswith(prefix):
+            return first[len(prefix) :].strip() or None, rest
+    return None, text
+
+
 async def _send_image_to_user(context: Any, path: str) -> bool:
     """把本地图片直接发给触发本次工具调用的会话，返回是否发送成功。"""
     try:
@@ -654,7 +693,7 @@ class RemoteCameraListTool(FunctionTool):
     "astrbot_plugin_cherry_remote",
     "littlewifeofsilverwolf",
     "远程操控连接器：桥接 AstrBot 与远程电脑 App",
-    "1.3.0",
+    "1.3.1",
 )
 class CherryRemote(Star):
     """Cherry Remote —— 远程操控连接器。
@@ -670,6 +709,8 @@ class CherryRemote(Star):
         self.config = config
         self.server: RemoteWsServer | None = None
         self._server_task: asyncio.Task | None = None
+        # 每个会话（unified_msg_origin）固定的目标设备：由 /use 设置，供斜杠命令默认使用
+        self._session_device: dict[str, str] = {}
 
     async def initialize(self) -> None:
         """启动 WebSocket 服务端并注册 FunctionTool。"""
@@ -734,11 +775,16 @@ class CherryRemote(Star):
             )
             return
         lines = [f"- {d['device_id']}（session {d['session_id'][:8]}）" for d in devices]
-        yield event.plain_result("Cherry Remote 已就绪，在线设备：\n" + "\n".join(lines))
+        yield event.plain_result(
+            "Cherry Remote 已就绪，在线设备：\n"
+            + "\n".join(lines)
+            + ("\n（多台在线时斜杠命令需指定设备：/use <设备id> 固定，或 /camera @<设备id>）"
+               if len(devices) > 1 else "")
+        )
 
     @filter.command("devices")
     async def devices(self, event: AstrMessageEvent):
-        """列出当前在线设备。"""
+        """列出当前在线设备，并给出斜杠命令的设备指定方式。"""
         if self.server is None:
             yield event.plain_result("Cherry Remote 尚未初始化。")
             return
@@ -746,17 +792,89 @@ class CherryRemote(Star):
         if not devices:
             yield event.plain_result("暂无在线设备。")
             return
-        lines = [f"- {d['device_id']}（session {d['session_id'][:8]}）" for d in devices]
-        yield event.plain_result("在线设备：\n" + "\n".join(lines))
+        pinned = self._session_device.get(event.unified_msg_origin)
+        lines = []
+        for d in devices:
+            mark = "  ← 本会话已固定（/use）" if d["device_id"] == pinned else ""
+            lines.append(f"- {d['device_id']}（session {d['session_id'][:8]}）{mark}")
+        yield event.plain_result(
+            "在线设备：\n"
+            + "\n".join(lines)
+            + "\n\n指定设备的方式（多台在线时必须指定）：\n"
+            + "· 会话固定：/use <设备id>（之后 /screenshot、/camera、/pull 默认用它）\n"
+            + "· 单次指定：/camera @<设备id> 1、/screenshot @<设备id>、/pull @<设备id> D:\\path\\a.zip"
+        )
 
-    @filter.command("screenshot")
-    async def screenshot(self, event: AstrMessageEvent):
-        """截取 C 端完整屏幕并直接以图片发送。"""
+    # ---------- 设备选择（斜杠命令专用：显式 @设备id > /use 固定 > 自动） ----------
+
+    def _resolve_device(
+        self, event: AstrMessageEvent, explicit: str | None
+    ) -> tuple[str | None, str | None]:
+        """返回 (device_id 或 None, 错误提示或 None)。"""
+        if explicit:
+            return explicit, None
+        pinned = self._session_device.get(event.unified_msg_origin)
+        if pinned:
+            online = self.server.devices if self.server else {}
+            if pinned in online:
+                return pinned, None
+            return None, (
+                f"本会话固定的设备 {pinned} 当前离线。\n"
+                f"用 /devices 查看在线设备；/use <其他设备id> 可换机，/use - 取消固定。"
+            )
+        return None, None
+
+    @filter.command("use")
+    async def use(self, event: AstrMessageEvent):
+        """固定本会话使用的远程设备（多台在线时必用）。用法：/use <设备id>；/use 查看；/use - 取消。"""
         if self.server is None:
             yield event.plain_result("Cherry Remote 尚未初始化。")
             return
+        arg = _command_tail(event, "use").strip()
+        umo = event.unified_msg_origin
+        ids = [d["device_id"] for d in self.server.device_summary()]
+        if not arg:
+            pinned = self._session_device.get(umo)
+            yield event.plain_result(
+                f"本会话固定设备：{pinned or '（未固定；多台在线时必须指定）'}\n"
+                f"在线设备：{'、'.join(ids) or '无'}\n"
+                "用法：/use <设备id> 固定；/use - 取消固定"
+            )
+            return
+        if arg in ("-", "clear", "off", "none", "取消"):
+            self._session_device.pop(umo, None)
+            yield event.plain_result("已取消本会话的设备固定，恢复自动选择（仅一台在线时可用）。")
+            return
+        match = next((i for i in ids if i == arg), None) or next(
+            (i for i in ids if i.lower() == arg.lower()), None
+        )
+        if not match:
+            yield event.plain_result(
+                f"设备 {arg} 不在线。当前在线：{'、'.join(ids) or '无'}\n"
+                "（device_id 可在 /devices 里复制，注意大小写）"
+            )
+            return
+        self._session_device[umo] = match
+        yield event.plain_result(
+            f"已固定本会话设备：{match}\n"
+            f"之后 /screenshot、/camera、/pull 默认发给它；单次换机可写 /camera @其他设备id"
+        )
+
+    @filter.command("screenshot")
+    async def screenshot(self, event: AstrMessageEvent):
+        """截取 C 端完整屏幕并直接以图片发送。用法：/screenshot [@设备id]"""
+        if self.server is None:
+            yield event.plain_result("Cherry Remote 尚未初始化。")
+            return
+        explicit, _ = _extract_device_prefix(_command_tail(event, "screenshot"))
+        device_id, err = self._resolve_device(event, explicit)
+        if err:
+            yield event.plain_result(err)
+            return
         try:
-            resp = await self.server.send_command("screenshot", {}, timeout=30)
+            resp = await self.server.send_command(
+                "screenshot", {}, device_id=device_id, timeout=30
+            )
         except Exception as e:
             yield event.plain_result(f"截屏失败: {e}")
             return
@@ -773,22 +891,30 @@ class CherryRemote(Star):
         yield event.chain_result(
             [
                 Comp.Image.fromFileSystem(path),
-                Comp.Plain(f"截图 {data.get('width')}x{data.get('height')}（{size_kb}KB）"),
+                Comp.Plain(
+                    f"截图 {data.get('width')}x{data.get('height')}（{size_kb}KB"
+                    f"，设备 {resp.get('device_id') or device_id or '自动'}）"
+                ),
             ]
         )
 
     @filter.command("camera")
     async def camera(self, event: AstrMessageEvent):
-        """用 C 端摄像头拍一张现场照片并直接发送。用法：/camera [摄像头index]"""
+        """用 C 端摄像头拍一张现场照片并直接发送。用法：/camera [@设备id] [摄像头index]"""
         if self.server is None:
             yield event.plain_result("Cherry Remote 尚未初始化。")
             return
-        parts = event.get_message_str().strip().split(maxsplit=1)
-        device = int(parts[1].strip()) if len(parts) > 1 and parts[1].strip().isdigit() else 0
+        explicit, tail = _extract_device_prefix(_command_tail(event, "camera"))
+        device_id, err = self._resolve_device(event, explicit)
+        if err:
+            yield event.plain_result(err)
+            return
+        index = int(tail) if tail.strip().isdigit() else 0
         try:
             resp = await self.server.send_command(
                 "camera",
-                {"device": device, "reason": "用户手动 /camera 指令"},
+                {"device": index, "reason": "用户手动 /camera 指令"},
+                device_id=device_id,
                 timeout=45,
             )
         except Exception as e:
@@ -814,27 +940,32 @@ class CherryRemote(Star):
                 Comp.Image.fromFileSystem(path),
                 Comp.Plain(
                     f"摄像头照片 {data.get('width')}x{data.get('height')}"
-                    f"（{size_kb}KB，设备 index={device}，来源 {data.get('source')}）"
+                    f"（{size_kb}KB，设备 {resp.get('device_id') or device_id or '自动'}"
+                    f"，摄像头 index={index}，来源 {data.get('source')}）"
                 ),
             ]
         )
 
     @filter.command("pull")
     async def pull(self, event: AstrMessageEvent):
-        """从 C 端拉取文件并直接发送。用法：/pull <远程文件路径>（路径含空格无需引号）"""
+        """从 C 端拉取文件并直接发送。用法：/pull [@设备id] <远程文件路径>（路径含空格无需引号）"""
         if self.server is None:
             yield event.plain_result("Cherry Remote 尚未初始化。")
             return
-        msg = event.get_message_str().strip()
-        parts = msg.split(maxsplit=1)
-        path = parts[1].strip().strip('\"') if len(parts) > 1 else ""
+        explicit, tail = _extract_device_prefix(_command_tail(event, "pull"))
+        device_id, err = self._resolve_device(event, explicit)
+        if err:
+            yield event.plain_result(err)
+            return
+        path = tail.strip().strip('"')
         if not path:
             yield event.plain_result(
-                "用法：/pull <远程文件路径>，例如 /pull D:\\temp\\report.pdf"
+                "用法：/pull [@设备id] <远程文件路径>，"
+                "例如 /pull @ChengXiyue D:\\temp\\report.pdf"
             )
             return
         try:
-            resp = await self.server.pull_file(path, timeout=600)
+            resp = await self.server.pull_file(path, device_id=device_id, timeout=600)
         except Exception as e:
             yield event.plain_result(f"拉取失败: {e}")
             return
@@ -847,7 +978,9 @@ class CherryRemote(Star):
             yield event.plain_result(f"文件已拉到本地但保存失败: {e}")
             return
         size_kb = (resp.get("size") or 0) // 1024
-        yield event.chain_result(_pulled_chain(local_path, resp.get("name"), size_kb))
+        chain = _pulled_chain(local_path, resp.get("name"), size_kb)
+        chain.append(Comp.Plain(f"来源设备：{device_id or '自动'}"))
+        yield event.chain_result(chain)
 
     async def terminate(self) -> None:
         """插件卸载/停用时：停止服务端，释放资源。"""

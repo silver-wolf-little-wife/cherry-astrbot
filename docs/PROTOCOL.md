@@ -398,7 +398,22 @@ B 端拉取大文件时使用流式分块，避免大段 base64 进入 LLM 上�
 | `remote_pull_file` | `file_pull` | 拉取文件 |
 | `remote_camera` | `camera`（capture） | 摄像头拍照：照片经 `CallToolResult + ImageContent` 交给多模态模型查看 |
 | `remote_camera_list` | `camera`（list） | 枚举 C 端摄像头 |
-| `/screenshot`、`/camera`、`/pull`、`/cherry`、`/devices` | — | 用户手动触发的管理指令 |
+| `/screenshot`、`/camera`、`/pull`、`/use`、`/cherry`、`/devices` | — | 用户手动触发的管理指令 |
+
+### 10.1 斜杠命令的设备选择（v1.3.1）
+
+多台 C 端在线时，`send_command` 不传 `device_id` 会回「多台设备在线」提示，
+因此斜杠命令补上两个设备入口（**B 端本地解析，不改变协议**）：
+
+| 写法 | 作用 |
+|---|---|
+| `/use <设备id>` | 固定**本会话**（`unified_msg_origin`）的目标设备；`/use` 查看，`/use -` 取消 |
+| `/camera @设备id [index]`、`/screenshot @设备id`、`/pull @设备id <路径>` | 单次指定设备 |
+| `--device <id>` / `-d <id>` / `device=<id>`（写在参数最前面） | 与 `@设备id` 等价 |
+
+- 解析优先级：显式选择器 > 会话固定 > 自动（仅一台在线时）。
+- 固定的设备掉线时命令回报明确提示，不会静默失败。
+- B 端在回包里附加 `device_id` 字段，便于确认这条结果来自哪台机器。
 
 `camera` 照片在 B 端有三种处理方式（配置项 `camera_mode`）：
 

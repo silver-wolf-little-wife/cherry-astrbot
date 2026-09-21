@@ -11,7 +11,7 @@
 
 # astrbot_plugin_cherry_remote
 
-**Cherry Remote** —— AstrBot 远程操控连接器。当前版本 **v1.3.0**。
+**Cherry Remote** —— AstrBot 远程操控连接器。当前版本 **v1.3.1**。
 
 桥接 AstrBot（B地·云服务器）与远程电脑上的 cherry-remote-app（C地·家庭局域网 PC），实现「手机发需求 → AstrBot 调 AI 生成指令 → 插件转发 → 远程电脑执行 → 结果回传 B 端研判 → 回复原会话」的完整闭环。
 
@@ -53,10 +53,28 @@
 ## 命令
 
 - `/cherry` —— 插件与在线设备状态
-- `/devices` —— 列出在线设备
-- `/screenshot` —— 直接截取 C 端屏幕并发图
-- `/camera [index]` —— 用 C 端摄像头拍一张照片并发图（需 C 端已开启 `camera.enabled`）
-- `/pull <远程路径>` —— 拉取 C 端文件并发图/发文件（路径含空格无需引号）
+- `/devices` —— 列出在线设备（并给出指定设备的方式）
+- `/use <设备id>` —— **固定本会话使用的设备**（`/use` 查看、`/use -` 取消）
+- `/screenshot [@设备id]` —— 截取 C 端屏幕并发图
+- `/camera [@设备id] [摄像头index]` —— 用 C 端摄像头拍照并发图（需 C 端已开启 `camera.enabled`）
+- `/pull [@设备id] <远程路径>` —— 拉取 C 端文件并发图/发文件（路径含空格无需引号）
+
+### 多台设备时怎么指定（v1.3.1 修复）
+
+**多台 C 端同时在线时，斜杠命令必须指定设备**，否则只会提示「多台设备在线」。两种方式：
+
+```
+/use ChengXiyue          # 方式一：固定本会话设备（推荐，之后不用每次写）
+/camera 1                # 这条就发给了 ChengXiyue 的 1 号摄像头
+
+/camera @002             # 方式二：单次指定（不改动会话固定）
+/screenshot @ChengXiyue
+/pull @002 D:\temp\a.zip
+```
+
+- 设备选择器支持 `@设备id`、`--device 设备id`、`-d 设备id`、`device=设备id`，写在参数最前面。
+- 固定的设备掉线时会明确提示（不静默失败），`/use` 重新指定即可。
+- AI 对话（工具调用）走 `device_id` 参数，一直支持多设备；本次修的是**斜杠命令没有这个入口**。
 
 ## 安装（B 端·云服务器）
 
@@ -98,6 +116,7 @@
 - [x] M6 安全加固（急停/多设备/防重复连接）
 - [x] M7 文件拉取（remote_pull_file + /pull，流式分块 + sha256 校验）
 - [x] M8 摄像头工具集（remote_camera / remote_camera_list + /camera，照片交给多模态模型查看）
+- [x] M9 斜杠命令支持指定设备（`@设备id` 单次指定 + `/use` 会话固定，修复多台在线时命令必失败）
 
 ## 作者
 
