@@ -29,6 +29,36 @@ except ImportError:  # pragma: no cover
 
 from .ws_server import RemoteWsServer
 
+try:  # 多模态图片回传：AstrBot 会把 ImageContent 交给多模态模型（mcp 为 astrbot 依赖）
+    from mcp.types import CallToolResult, ImageContent, TextContent
+except ImportError:  # pragma: no cover —— 环境无 mcp 时降级为纯文本返回
+    CallToolResult = None  # type: ignore[assignment]
+    ImageContent = None  # type: ignore[assignment]
+    TextContent = None  # type: ignore[assignment]
+
+
+# C 端 camera 错误码 → 给用户看的人话提示
+_CAMERA_ERROR_HINTS = {
+    "CameraDisabled": "该电脑未开启摄像头功能（需在 C 端 config.yaml 设置 camera.enabled: true）",
+    "CameraBackendUnavailable": "该电脑缺少摄像头采集组件（未安装 OpenCV，也没有 ffmpeg）",
+    "CameraNotFound": "没找到摄像头设备",
+    "CameraOpenFailed": "摄像头无法打开：可能被其他程序占用，或被系统隐私设置禁止桌面应用访问相机",
+    "CameraBusy": "上一次拍摄还没结束，请稍后再试",
+    "CameraNoInteractiveSession": "C 端运行在服务会话且当前没有用户登录，无法访问摄像头",
+    "CameraCaptureFailed": "取帧失败：请检查摄像头是否被遮挡或设备异常",
+    "CameraRateLimited": "拍摄太频繁（C 端限流），请稍后再试",
+    "NotImplementedError": "C 端版本过低，不支持 camera 指令（请升级 cherry-remote-app 到 v1.4.0+）",
+}
+
+_IMAGE_EXTS = {
+    "jpeg": ".jpg",
+    "jpg": ".jpg",
+    "png": ".png",
+    "webp": ".webp",
+    "bmp": ".bmp",
+    "gif": ".gif",
+}
+
 
 def _get_plugin_data_dir() -> Path:
     """获取插件数据目录：data/plugin_data/cherry_remote/。"""
@@ -39,15 +69,73 @@ def _get_plugin_data_dir() -> Path:
     return d
 
 
+def _save_image(data: dict, subdir: str = "screenshots", default_ext: str = ".png", keep: int | None = None) -> str:
+    """把 C 端返回的 base64 图片解码并存到 B 端本地，返回文件路径。
+
+    subdir：screenshots（截屏）/ camera（摄像头照片）；
+    keep：非空时只保留该目录下最近 keep 张（自动清理旧图，避免磁盘无限增长）。
+    """
+    img_bytes = base64.b64decode(data["image"])
+    ext = _IMAGE_EXTS.get(str(data.get("format") or "").lower(), default_ext)
+    directory = _get_plugin_data_dir() / subdir
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"shot_{int(time.time())}_{uuid.uuid4().hex[:6]}{ext}"
+    path.write_bytes(img_bytes)
+    if keep and keep > 0:
+        _prune_images(directory, keep)
+    return str(path)
+
+
+def _prune_images(directory: Path, keep: int) -> None:
+    """只保留目录下最新的 keep 张图（按修改时间）。"""
+    try:
+        files = sorted(
+            (p for p in directory.iterdir() if p.is_file()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for old in files[keep:]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    except Exception as e:  # noqa: BLE001 —— 清理失败不影响主流程
+        logger.warning(f"清理旧图片失败（忽略）: {e}")
+
+
 def _save_screenshot_image(data: dict) -> str:
     """把 C 端返回的 base64 截图解码并存到 B 端本地，返回文件路径。"""
-    img_bytes = base64.b64decode(data["image"])
-    shots = _get_plugin_data_dir() / "screenshots"
-    shots.mkdir(parents=True, exist_ok=True)
-    fname = f"shot_{int(time.time())}_{uuid.uuid4().hex[:6]}.png"
-    path = shots / fname
-    path.write_bytes(img_bytes)
-    return str(path)
+    return _save_image(data, subdir="screenshots", default_ext=".png")
+
+
+def _camera_error_hint(error: Any) -> str:
+    """把 C 端的 camera 错误码翻译成人话提示。"""
+    if isinstance(error, dict):
+        code = str(error.get("code") or "")
+        message = str(error.get("message") or "")
+        hint = _CAMERA_ERROR_HINTS.get(code)
+        if hint:
+            return f"{hint}（{code}: {message}）" if message else hint
+        return f"{code}: {message}" if code else str(error)
+    return str(error)
+
+
+def _json(data: Any) -> str:
+    return json.dumps(data, ensure_ascii=False, default=str)
+
+
+async def _send_image_to_user(context: Any, path: str) -> bool:
+    """把本地图片直接发给触发本次工具调用的会话，返回是否发送成功。"""
+    try:
+        inner = getattr(context, "context", None)
+        star_ctx = getattr(inner, "context", None)
+        event = getattr(inner, "event", None)
+        if star_ctx is not None and event is not None:
+            await star_ctx.send_message(event.unified_msg_origin, MessageChain().file_image(path))
+            return True
+    except Exception as e:  # noqa: BLE001 —— 直发失败则回退为返回路径
+        logger.warning(f"照片直接发送失败，改为返回路径: {e}")
+    return False
 
 
 def _persist_pulled(resp: dict) -> str:
@@ -335,19 +423,9 @@ class RemoteScreenshotTool(FunctionTool):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"保存截图失败: {e}"}, ensure_ascii=False)
 
-        sent = False
-        try:
-            inner = getattr(context, "context", None)
-            star_ctx = getattr(inner, "context", None)
-            event = getattr(inner, "event", None)
-            if star_ctx is not None and event is not None:
-                chain = MessageChain().file_image(path)
-                await star_ctx.send_message(event.unified_msg_origin, chain)
-                sent = True
-        except Exception as e:  # noqa: BLE001 —— 直发失败则回退为返回路径
-            logger.warning(f"截图直接发送失败，改为返回路径: {e}")
+        sent = await _send_image_to_user(context, path)
 
-        return json.dumps(
+        return _json(
             {
                 "ok": True,
                 "sent_to_user": sent,
@@ -355,8 +433,7 @@ class RemoteScreenshotTool(FunctionTool):
                 "width": data.get("width"),
                 "height": data.get("height"),
                 "size": data.get("size"),
-            },
-            ensure_ascii=False,
+            }
         )
 
 
@@ -432,11 +509,152 @@ class RemotePullFileTool(FunctionTool):
         )
 
 
+@dataclass
+class RemoteCameraTool(FunctionTool):
+    """用远程电脑摄像头拍照（看屏幕之外的物理环境）。"""
+
+    name: str = "remote_camera"
+    description: str = (
+        "用远程电脑（C端）的摄像头拍摄一张现场照片，用于了解电脑周围的环境"
+        "（房间、设备指示灯、纸质材料等）。"
+        "适合回答「家里现在什么情况」「桌上有什么」这类需要看物理环境的问题；"
+        "只看屏幕内容请用 remote_screenshot，取文件内容请用 remote_pull_file。"
+        "拍照会点亮摄像头指示灯，且受 C 端限流（默认 5 秒冷却、每小时 60 次）。"
+    )
+    parameters: dict = field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "device": {
+                    "type": "integer",
+                    "description": "摄像头 index，默认 0；多摄像头时先用 remote_camera_list 查询。",
+                },
+                "width": {"type": "integer", "description": "照片宽度，默认 1280。"},
+                "height": {"type": "integer", "description": "照片高度，默认 720。"},
+                "burst": {
+                    "type": "integer",
+                    "description": "连拍帧数（1~5），多帧时自动选最清晰的一帧，默认 1。",
+                },
+                "mirror": {"type": "boolean", "description": "是否左右镜像，默认 false。"},
+                "reason": {
+                    "type": "string",
+                    "description": "调用原因，写入 C 端审计日志便于事后核对，建议填写。",
+                },
+                "device_id": {
+                    "type": "string",
+                    "description": "目标设备 id（多设备在线时指定）。",
+                },
+            },
+        }
+    )
+
+    async def call(self, context: Any, **kwargs) -> ToolExecResult:
+        server: RemoteWsServer | None = getattr(self, "_server", None)
+        if server is None:
+            return _json({"ok": False, "error": "连接器尚未初始化"})
+
+        params = {
+            k: v
+            for k, v in kwargs.items()
+            if v is not None and k not in ("device_id", "send_to_user")
+        }
+        try:
+            resp = await server.send_command(
+                "camera", params, device_id=kwargs.get("device_id"), timeout=45
+            )
+        except Exception as e:
+            return _json({"ok": False, "error": str(e)})
+        if not resp.get("ok"):
+            return _json({"ok": False, "error": _camera_error_hint(resp.get("error"))})
+
+        data = resp["data"]
+        mode = str(getattr(self, "_camera_mode", "vision") or "vision").lower()
+        keep = int(getattr(self, "_camera_keep", 50) or 0)
+        try:
+            path = _save_image(data, subdir="camera", default_ext=".jpg", keep=keep)
+        except Exception as e:
+            return _json({"ok": False, "error": f"保存照片失败: {e}"})
+
+        device = data.get("device") or {}
+        sent = False
+        if mode in ("forward", "both") and kwargs.get("send_to_user", True):
+            sent = await _send_image_to_user(context, path)
+
+        if mode in ("vision", "both") and CallToolResult is not None:
+            text = (
+                f"已在远程电脑上拍摄一张照片：{data.get('width')}x{data.get('height')}，"
+                f"{data.get('size')} 字节，设备 index={device.get('index')}"
+                f"（{device.get('system_name') or '未识别名称'}），"
+                f"拍摄时间 {data.get('captured_at')}，本地留存路径 {path}。"
+                "请查看图片内容并据此回答用户。"
+                + ("照片已直接发送给对方。" if sent else "")
+            )
+            mime = "image/png" if str(data.get("format")).lower() == "png" else "image/jpeg"
+            return CallToolResult(
+                content=[
+                    TextContent(type="text", text=text),
+                    ImageContent(type="image", data=data["image"], mimeType=mime),
+                ]
+            )
+
+        return _json(
+            {
+                "ok": True,
+                "sent_to_user": sent,
+                "path": path,
+                "width": data.get("width"),
+                "height": data.get("height"),
+                "size": data.get("size"),
+                "device": device,
+                "captured_at": data.get("captured_at"),
+                "source": data.get("source"),
+                "note": "当前 camera_mode 未把照片送入模型上下文，仅落盘/直发",
+            }
+        )
+
+
+@dataclass
+class RemoteCameraListTool(FunctionTool):
+    """列出远程电脑的摄像头设备。"""
+
+    name: str = "remote_camera_list"
+    description: str = (
+        "列出远程电脑（C端）的摄像头设备（index、分辨率、设备名）。"
+        "拍照前可用它确认设备；若提示未开启摄像头功能（CameraDisabled），"
+        "说明该电脑的 C 端配置里 camera.enabled 仍为 false。"
+    )
+    parameters: dict = field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "device_id": {
+                    "type": "string",
+                    "description": "目标设备 id（多设备在线时指定）。",
+                },
+            },
+        }
+    )
+
+    async def call(self, context: Any, **kwargs) -> ToolExecResult:
+        server: RemoteWsServer | None = getattr(self, "_server", None)
+        if server is None:
+            return _json({"ok": False, "error": "连接器尚未初始化"})
+        try:
+            resp = await server.send_command(
+                "camera", {"action": "list"}, device_id=kwargs.get("device_id"), timeout=45
+            )
+        except Exception as e:
+            return _json({"ok": False, "error": str(e)})
+        if not resp.get("ok"):
+            return _json({"ok": False, "error": _camera_error_hint(resp.get("error"))})
+        return _json(resp.get("data"))
+
+
 @register(
     "astrbot_plugin_cherry_remote",
     "littlewifeofsilverwolf",
     "远程操控连接器：桥接 AstrBot 与远程电脑 App",
-    "1.2.0",
+    "1.3.0",
 )
 class CherryRemote(Star):
     """Cherry Remote —— 远程操控连接器。
@@ -490,6 +708,17 @@ class CherryRemote(Star):
             tool = tool_cls()
             tool._server = self.server  # type: ignore[attr-defined]
             built.append(tool)
+
+        # 摄像头工具：可由配置整体关闭（默认开启；C 端仍需 camera.enabled=true 才真正可用）
+        if bool(self.config.get("camera_enabled", True)):
+            camera_mode = str(self.config.get("camera_mode", "vision") or "vision")
+            camera_keep = int(self.config.get("camera_keep", 50) or 0)
+            for tool_cls in (RemoteCameraTool, RemoteCameraListTool):
+                tool = tool_cls()
+                tool._server = self.server  # type: ignore[attr-defined]
+                tool._camera_mode = camera_mode  # type: ignore[attr-defined]
+                tool._camera_keep = camera_keep  # type: ignore[attr-defined]
+                built.append(tool)
         return built
 
     @filter.command("cherry")
@@ -545,6 +774,48 @@ class CherryRemote(Star):
             [
                 Comp.Image.fromFileSystem(path),
                 Comp.Plain(f"截图 {data.get('width')}x{data.get('height')}（{size_kb}KB）"),
+            ]
+        )
+
+    @filter.command("camera")
+    async def camera(self, event: AstrMessageEvent):
+        """用 C 端摄像头拍一张现场照片并直接发送。用法：/camera [摄像头index]"""
+        if self.server is None:
+            yield event.plain_result("Cherry Remote 尚未初始化。")
+            return
+        parts = event.get_message_str().strip().split(maxsplit=1)
+        device = int(parts[1].strip()) if len(parts) > 1 and parts[1].strip().isdigit() else 0
+        try:
+            resp = await self.server.send_command(
+                "camera",
+                {"device": device, "reason": "用户手动 /camera 指令"},
+                timeout=45,
+            )
+        except Exception as e:
+            yield event.plain_result(f"拍照失败: {e}")
+            return
+        if not resp.get("ok"):
+            yield event.plain_result(f"拍照失败: {_camera_error_hint(resp.get('error'))}")
+            return
+        data = resp["data"]
+        try:
+            path = _save_image(
+                data,
+                subdir="camera",
+                default_ext=".jpg",
+                keep=int(self.config.get("camera_keep", 50) or 0),
+            )
+        except Exception as e:
+            yield event.plain_result(f"拍照成功但保存失败: {e}")
+            return
+        size_kb = (data.get("size") or 0) // 1024
+        yield event.chain_result(
+            [
+                Comp.Image.fromFileSystem(path),
+                Comp.Plain(
+                    f"摄像头照片 {data.get('width')}x{data.get('height')}"
+                    f"（{size_kb}KB，设备 index={device}，来源 {data.get('source')}）"
+                ),
             ]
         )
 

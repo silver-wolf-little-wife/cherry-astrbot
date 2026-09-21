@@ -28,5 +28,23 @@
     "description": "单次拉取文件大小上限（字节）",
     "default": 209715200,
     "hint": "默认 200MB"
+  },
+  "camera_enabled": {
+    "type": "bool",
+    "description": "是否向 AI 注册摄像头工具（remote_camera / remote_camera_list）",
+    "default": true,
+    "hint": "仅控制 B 端是否提供工具；C 端还需在 config.yaml 里把 camera.enabled 设为 true 才真正可用"
+  },
+  "camera_mode": {
+    "type": "string",
+    "description": "摄像头照片的处理方式：vision=交给多模态模型查看（默认）/ forward=直接发给用户 / both=两者都做",
+    "default": "vision",
+    "hint": "模型不支持看图片时请改为 forward，否则照片不会进模型上下文"
+  },
+  "camera_keep": {
+    "type": "int",
+    "description": "B 端本地保留的摄像头照片数量（超出自动删除最旧的）",
+    "default": 50,
+    "hint": "照片保存在 data/plugin_data/cherry_remote/camera/"
   }
 }
